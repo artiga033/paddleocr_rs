@@ -1,32 +1,69 @@
-use std::{path::Path, borrow::Cow};
+use crate::{error::PaddleOcrResult, PaddleOcrError};
 use image::{DynamicImage, GenericImageView};
-use ndarray::{Array, ArrayBase, Dim, OwnedRepr, Axis, s};
+use ndarray::{s, Array, ArrayBase, Axis, Dim, OwnedRepr};
 use ort::inputs;
 use ort::session::{builder::SessionBuilder, Session};
-use crate::{error::PaddleOcrResult, PaddleOcrError};
+use std::{borrow::Cow, path::Path};
 
 pub struct Rec {
     model: Session,
     keys: Vec<char>,
-    min_score: f32
+    min_score: f32,
 }
 
 impl Rec {
     const MIN_SCORE_DEFAULT: f32 = 0.8;
 
     pub fn new(model: Session, keys: Vec<char>) -> Self {
-        Self { model, keys, min_score: Self::MIN_SCORE_DEFAULT }
+        Self {
+            model,
+            keys,
+            min_score: Self::MIN_SCORE_DEFAULT,
+        }
     }
 
-    pub fn from_file(model_path: impl AsRef<Path>, keys_path: impl AsRef<Path>) -> PaddleOcrResult<Self> {
-        let model = SessionBuilder::new()?.commit_from_file(model_path)?;
-        let keys = " ".chars()
-            .chain(std::fs::read_to_string(keys_path)?
+    pub fn from_file(
+        model_path: impl AsRef<Path>,
+        keys_path: impl AsRef<Path>,
+    ) -> PaddleOcrResult<Self> {
+        let model = SessionBuilder::new()?
+            .with_execution_providers([
+                #[cfg(feature = "ort-cuda")]
+                ort::execution_providers::cuda::CUDAExecutionProvider::default().build(),
+                #[cfg(feature = "ort-tensorrt")]
+                ort::execution_providers::tensorrt::TensorRTExecutionProvider::default().build(),
+                #[cfg(feature = "ort-openvino")]
+                ort::execution_providers::openvino::OpenVINOExecutionProvider::default().build(),
+                #[cfg(feature = "ort-onednn")]
+                ort::execution_providers::onednn::OneDNNExecutionProvider::default().build(),
+                #[cfg(feature = "ort-directml")]
+                ort::execution_providers::directml::DirectMLExecutionProvider::default().build(),
+                #[cfg(feature = "ort-qnn")]
+                ort::execution_providers::qnn::QnnExecutionProvider::default().build(),
+                #[cfg(feature = "ort-coreml")]
+                ort::execution_providers::coreml::CoreMLExecutionProvider::default().build(),
+                #[cfg(feature = "ort-acl")]
+                ort::execution_providers::acl::ACLExecutionProvider::default().build(),
+                #[cfg(feature = "ort-tvm")]
+                ort::execution_providers::tvm::TVMExecutionProvider::default().build(),
+                #[cfg(feature = "ort-cann")]
+                ort::execution_providers::cann::CANNExecutionProvider::default().build(),
+            ])?
+            .commit_from_file(model_path)?;
+        let keys = " "
             .chars()
-            .filter(|x| *x != '\n'))
+            .chain(
+                std::fs::read_to_string(keys_path)?
+                    .chars()
+                    .filter(|x| *x != '\n'),
+            )
             .chain(" ".chars())
             .collect();
-        Ok(Self { model, keys, min_score: Self::MIN_SCORE_DEFAULT })
+        Ok(Self {
+            model,
+            keys,
+            min_score: Self::MIN_SCORE_DEFAULT,
+        })
     }
 
     pub fn with_min_score(mut self, min_score: f32) -> Self {
@@ -45,13 +82,15 @@ impl Rec {
         Ok(ret.into_iter().map(|x| x.0).collect())
     }
 
-    fn preprocess(img: &DynamicImage) -> PaddleOcrResult<ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>> {
+    fn preprocess(
+        img: &DynamicImage,
+    ) -> PaddleOcrResult<ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>> {
         let (w, h) = img.dimensions();
         let img = if h <= 48 {
             Cow::Borrowed(img)
         } else {
             Cow::Owned(img.resize_exact(w, 48, image::imageops::FilterType::CatmullRom))
-        };    
+        };
         let mut input = Array::zeros((1, 3, 48, w as usize));
         for pixel in img.pixels() {
             let x = pixel.0 as _;
@@ -64,24 +103,29 @@ impl Rec {
         Ok(input)
     }
 
-    fn run_model(&self, input: &ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>) -> PaddleOcrResult<Vec<(char, f32)>>{
+    fn run_model(
+        &self,
+        input: &ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>,
+    ) -> PaddleOcrResult<Vec<(char, f32)>> {
         let outputs = self.model.run(inputs!["x" => input.view()]?)?;
-        let output = outputs.iter().next().ok_or(PaddleOcrError::custom("no output"))?.1;
+        let output = outputs
+            .iter()
+            .next()
+            .ok_or(PaddleOcrError::custom("no output"))?
+            .1;
         let output = output.try_extract_tensor::<f32>()?;
         let output = output.view();
         let output = output.slice(s![0, .., ..]);
-        let output = output.axis_iter(Axis(0))
+        let output = output
+            .axis_iter(Axis(0))
             .filter_map(|x| {
-                x.iter().copied().enumerate().max_by(|(_, x), (_, y)|{
-                    x.total_cmp(y)
-                })
+                x.iter()
+                    .copied()
+                    .enumerate()
+                    .max_by(|(_, x), (_, y)| x.total_cmp(y))
             })
-            .filter(|(index, score)|{
-                *index != 0 && *score > self.min_score
-            })
-            .filter_map(|(index, score)|{
-                self.keys.get(index).map(|x| (*x, score))
-            })
+            .filter(|(index, score)| *index != 0 && *score > self.min_score)
+            .filter_map(|(index, score)| self.keys.get(index).map(|x| (*x, score)))
             .collect();
         Ok(output)
     }

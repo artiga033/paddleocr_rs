@@ -16,3 +16,18 @@ imageproc = "0.25"
 ndarray = "0.16"
 ort = { version = "2.0.0-rc.6" }
 thiserror = "1.0.56"
+
+[dev-dependencies]
+tracing-subscriber = "0.3.19"
+
+[features]
+ort-cuda = ["ort/cuda"]
+ort-tensorrt = ["ort/tensorrt"]
+ort-openvino = ["ort/openvino"]
+ort-onednn = ["ort/onednn"]
+ort-directml = ["ort/directml"]
+ort-qnn = ["ort/qnn"]
+ort-coreml = ["ort/coreml"]
+ort-acl = ["ort/acl"]
+ort-tvm = ["ort/tvm"]
+ort-cann = ["ort/cann"]

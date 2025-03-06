@@ -1,27 +1,56 @@
-use std::path::Path;
-use image::{DynamicImage, GenericImageView, Luma, GrayImage};
-use imageproc::{rect::Rect, point::Point};
+use image::{DynamicImage, GenericImageView, GrayImage, Luma};
+use imageproc::{point::Point, rect::Rect};
 use ndarray::{Array, ArrayBase, Dim, OwnedRepr};
 use ort::inputs;
 use ort::session::{builder::SessionBuilder, Session};
+use std::path::Path;
 
 use crate::{error::PaddleOcrResult, PaddleOcrError};
 
 pub struct Det {
     model: Session,
-    rect_border_size: u32
+    rect_border_size: u32,
 }
 
 impl Det {
     const RECT_BORDER_SIZE: u32 = 8;
 
     pub fn new(model: Session) -> Self {
-        Self { model, rect_border_size: Self::RECT_BORDER_SIZE}
+        Self {
+            model,
+            rect_border_size: Self::RECT_BORDER_SIZE,
+        }
     }
 
     pub fn from_file(model_path: impl AsRef<Path>) -> PaddleOcrResult<Self> {
-        let model = SessionBuilder::new()?.commit_from_file(model_path)?;
-        Ok(Self { model, rect_border_size: Self::RECT_BORDER_SIZE })
+        let model = SessionBuilder::new()?
+            .with_execution_providers([
+                #[cfg(feature = "ort-cuda")]
+                ort::execution_providers::cuda::CUDAExecutionProvider::default().build(),
+                #[cfg(feature = "ort-tensorrt")]
+                ort::execution_providers::tensorrt::TensorRTExecutionProvider::default().build(),
+                #[cfg(feature = "ort-openvino")]
+                ort::execution_providers::openvino::OpenVINOExecutionProvider::default().build(),
+                #[cfg(feature = "ort-onednn")]
+                ort::execution_providers::onednn::OneDNNExecutionProvider::default().build(),
+                #[cfg(feature = "ort-directml")]
+                ort::execution_providers::directml::DirectMLExecutionProvider::default().build(),
+                #[cfg(feature = "ort-qnn")]
+                ort::execution_providers::qnn::QnnExecutionProvider::default().build(),
+                #[cfg(feature = "ort-coreml")]
+                ort::execution_providers::coreml::CoreMLExecutionProvider::default().build(),
+                #[cfg(feature = "ort-acl")]
+                ort::execution_providers::acl::ACLExecutionProvider::default().build(),
+                #[cfg(feature = "ort-tvm")]
+                ort::execution_providers::tvm::TVMExecutionProvider::default().build(),
+                #[cfg(feature = "ort-cann")]
+                ort::execution_providers::cann::CANNExecutionProvider::default().build(),
+            ])?
+            .commit_from_file(model_path)?;
+        Ok(Self {
+            model,
+            rect_border_size: Self::RECT_BORDER_SIZE,
+        })
     }
 
     pub fn with_rect_border_size(mut self, rect_border_size: u32) -> Self {
@@ -36,14 +65,16 @@ impl Det {
     }
 
     pub fn find_text_img(&self, img: &DynamicImage) -> PaddleOcrResult<Vec<DynamicImage>> {
-        Ok(self.find_text_rect(img)?
+        Ok(self
+            .find_text_rect(img)?
             .iter()
             .map(|r| img.crop_imm(r.left() as u32, r.top() as u32, r.width(), r.height()))
-            .collect()
-        )
+            .collect())
     }
 
-    fn preprocess(img: &DynamicImage) -> PaddleOcrResult<ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>> {
+    fn preprocess(
+        img: &DynamicImage,
+    ) -> PaddleOcrResult<ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>> {
         let (w, h) = img.dimensions();
         let pad_w = Self::get_pad_length(w);
         let pad_h = Self::get_pad_length(h);
@@ -60,15 +91,20 @@ impl Det {
         Ok(input)
     }
 
-    fn run_model(&self, input: &ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>, width: u32, height: u32) -> PaddleOcrResult<GrayImage>{
+    fn run_model(
+        &self,
+        input: &ArrayBase<OwnedRepr<f32>, Dim<[usize; 4]>>,
+        width: u32,
+        height: u32,
+    ) -> PaddleOcrResult<GrayImage> {
         let pad_h = Self::get_pad_length(height);
         let outputs = self.model.run(inputs!["x" => input.view()]?)?;
-        let output = outputs.iter().next().ok_or(PaddleOcrError::custom("no output"))?.1;
-        let output = output
-            .try_extract_tensor::<f32>()?
-            .view()
-            .t()
-            .to_owned();
+        let output = outputs
+            .iter()
+            .next()
+            .ok_or(PaddleOcrError::custom("no output"))?
+            .1;
+        let output = output.try_extract_tensor::<f32>()?.view().t().to_owned();
         let output: Vec<_> = output.iter().collect();
         let img = image::ImageBuffer::from_fn(width, height, |x, y| {
             Luma([(*output[(x * pad_h + y) as usize] * 255.0).min(255.0) as u8])
@@ -76,33 +112,38 @@ impl Det {
         Ok(img)
     }
 
-    fn find_box(&self, img: &GrayImage) ->Vec<Rect> {
+    fn find_box(&self, img: &GrayImage) -> Vec<Rect> {
         let (w, h) = img.dimensions();
         imageproc::contours::find_contours_with_threshold::<u32>(img, 200)
             .into_iter()
             .filter(|x| x.parent.is_none())
             .map(|x| x.points)
-            .map(|x| Self::bounding_rect(&x))
-            .filter_map(|x| x)
+            .filter_map(|x| Self::bounding_rect(&x))
             .map(|x| {
-                Rect::at((x.left() - self.rect_border_size as i32).max(0), (x.top() - self.rect_border_size as i32).max(0))
-                    .of_size((x.width() + self.rect_border_size * 2).min(w), (x.height() + self.rect_border_size * 2).min(h))
+                Rect::at(
+                    (x.left() - self.rect_border_size as i32).max(0),
+                    (x.top() - self.rect_border_size as i32).max(0),
+                )
+                .of_size(
+                    (x.width() + self.rect_border_size * 2).min(w),
+                    (x.height() + self.rect_border_size * 2).min(h),
+                )
             })
             .collect()
     }
 
     fn bounding_rect(points: &[Point<u32>]) -> Option<Rect> {
-        let (x_min, x_max, y_min, y_max) = points.into_iter()
-            .fold(None, |ret, p|{
-                match ret {
-                    None => Some((p.x, p.x, p.y, p.y)),
-                    Some((x_min, x_max, y_min, y_max)) => {
-                        Some((x_min.min(p.x), x_max.max(p.x), y_min.min(p.y), y_max.max(p.y)))
-                    }
-                }
-            })?; 
-        let width = (x_max - x_min) as u32;
-        let height = (y_max - y_min) as u32;
+        let (x_min, x_max, y_min, y_max) = points.iter().fold(None, |ret, p| match ret {
+            None => Some((p.x, p.x, p.y, p.y)),
+            Some((x_min, x_max, y_min, y_max)) => Some((
+                x_min.min(p.x),
+                x_max.max(p.x),
+                y_min.min(p.y),
+                y_max.max(p.y),
+            )),
+        })?;
+        let width = x_max - x_min;
+        let height = y_max - y_min;
         if width <= 5 || height <= 5 {
             return None;
         }

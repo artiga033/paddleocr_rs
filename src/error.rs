@@ -5,7 +5,7 @@ pub enum PaddleOcrError {
     #[error("io error:`{0}`")]
     Io(#[from] std::io::Error),
     #[error("custom error:`{0}`")]
-    Custom(String)
+    Custom(String),
 }
 
 impl PaddleOcrError {

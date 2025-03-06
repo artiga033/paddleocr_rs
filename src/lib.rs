@@ -8,10 +8,15 @@ pub use rec::Rec;
 
 #[cfg(test)]
 mod tests {
+    use tracing_subscriber::filter::LevelFilter;
+
     use super::*;
 
     #[test]
     fn it_works() -> Result<(), Box<dyn std::error::Error>> {
+        tracing_subscriber::fmt()
+            .with_max_level(LevelFilter::DEBUG)
+            .init();
         let det = Det::from_file("./models/ch_PP-OCRv4_det_infer.onnx")?;
         let rec = Rec::from_file(
             "./models/ch_PP-OCRv4_rec_infer.onnx",
